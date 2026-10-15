@@ -1443,8 +1443,10 @@ void CodeGenTileLangAscend::EmitGmToL1Copy_(const CallNode *op) {
       GetIntImmArg(op, 9, "tl.ascend_copy_gm_to_cbuf", "transpose") != 0;
   const std::string nz_c0_stride = PrintExpr(op->args[10]);
   PrintIndent();
-  stream << "asc_set_gm2l1_nz_para(1, 1, static_cast<uint16_t>(" << nz_c0_stride
-         << "), 0);\n";
+  // Four 16-bit fields: batch count, NZ N stride, NZ C0 stride, batch stride.
+  stream << "asc_set_gm2l1_nz_para(uint64_t(1) | (uint64_t(1) << 16) | "
+            "(static_cast<uint64_t>(static_cast<uint16_t>("
+         << nz_c0_stride << ")) << 32));\n";
 
   std::string destination_prefix;
   std::string source_prefix;
@@ -1462,7 +1464,7 @@ void CodeGenTileLangAscend::EmitGmToL1Copy_(const CallNode *op) {
                 {{op->args[0], destination_prefix, pointer_suffix},
                  {op->args[1], source_prefix, pointer_suffix},
                  {op->args[3]},
-                 {op->args[4], "static_cast<asc_load_l2_cache_mode>(", ")"},
+                 {op->args[4], "static_cast<uint8_t>(", ")"},
                  {op->args[5]},
                  {op->args[6]},
                  {op->args[7]},
@@ -1498,7 +1500,7 @@ void CodeGenTileLangAscend::EmitL0cToGmCopy_(const CallNode *op) {
       << "tl.ascend_copy_matrix_cc_to_gm expects exactly 25 arguments";
 
   PrintIndent();
-  stream << "asc_set_l0c_copy_nz_para(1, 0, 0);\n";
+  stream << "asc_set_l0c2gm_nz2nd(1, 0, 0);\n";
   EmitCApiCall_("asc_copy_l0c2gm",
                 {{op->args[0]},
                  {op->args[1]},
@@ -1506,14 +1508,21 @@ void CodeGenTileLangAscend::EmitL0cToGmCopy_(const CallNode *op) {
                  {op->args[4]},
                  {op->args[5]},
                  {op->args[6]},
-                 {op->args[7], "static_cast<asc_store_l2_cache_mode>(", ")"},
-                 {op->args[9], "static_cast<asc_unit_flag_mode>(", ")"},
-                 {op->args[10], "static_cast<asc_quant_mode>(", ")"},
-                 {op->args[11], "static_cast<asc_relu_pre_mode>(", ")"},
+                 {op->args[7], "static_cast<uint8_t>(", ")"},
+                 {op->args[8]},
+                 {op->args[9], "static_cast<uint8_t>(", ")"},
+                 {op->args[10], "static_cast<uint64_t>(", ")"},
+                 {op->args[11], "static_cast<uint8_t>(", ")"},
                  {op->args[12]},
                  {op->args[13]},
-                 {op->args[24]},
-                 {op->args[8]}});
+                 {op->args[14]},
+                 {op->args[15]},
+                 {op->args[16]},
+                 {op->args[18]},
+                 {op->args[19]},
+                 {op->args[21]},
+                 {op->args[23]},
+                 {op->args[24]}});
 }
 
 void CodeGenTileLangAscend::EmitSetCopyPadValue_(const CallNode *op) {
