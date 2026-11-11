@@ -1557,13 +1557,29 @@ void CodeGenTileLangAscend::EmitSetCopyPadValue_(const CallNode *op) {
   ICHECK_EQ(op->args.size(), 1)
       << "tl.ascend_set_copy_pad_value expects exactly 1 argument";
   const DataType dtype = op->args[0].dtype();
-  // FP8/FP4 的填充值只能是常量 0（物理字节 0x00），直接按 uint8_t 写入，
-  // 避免为这类 dtype 生成非法的 C++ 标量字面量。
-  if (dtype.is_float8_e4m3fn() || dtype.is_float8_e5m2() ||
-      dtype.is_float4_e2m1fn()) {
+  // Probe branch: FP4 has no legal C++ scalar form, so encode the 4-bit value
+  // into the physical pad byte by duplicating the nibble. The probe from
+  // 2026-11-11 showed the hardware copies the register's low byte verbatim.
+  if (dtype.is_float4_e2m1fn()) {
+    const auto *value = op->args[0].as<FloatImmNode>();
+    ICHECK(value != nullptr)
+        << "FP4 pad probe requires a constant value, got " << op->args[0];
+    static const double kE2M1Magnitudes[8] = {0.0, 0.5, 1.0, 1.5,
+                                              2.0, 3.0, 4.0, 6.0};
+    int magnitude = -1;
+    for (int candidate = 0; candidate < 8; ++candidate) {
+      if (kE2M1Magnitudes[candidate] == std::fabs(value->value)) {
+        magnitude = candidate;
+        break;
+      }
+    }
+    ICHECK(magnitude >= 0)
+        << "FP4 pad probe supports only exactly representable E2M1 values, got "
+        << value->value;
+    const int code = magnitude | (std::signbit(value->value) ? 8 : 0);
     const std::string target_value = name_supply_->FreshName("__asc_pad_val");
     PrintIndent();
-    stream << "uint8_t " << target_value << " = 0;\n";
+    stream << "uint8_t " << target_value << " = " << code * 0x11 << ";\n";
     PrintIndent();
     stream << "asc_set_copy_pad_val(*reinterpret_cast<uint8_t*>(&"
            << target_value << "));\n";
