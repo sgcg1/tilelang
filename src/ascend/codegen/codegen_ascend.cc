@@ -1557,6 +1557,28 @@ void CodeGenTileLangAscend::EmitSetCopyPadValue_(const CallNode *op) {
   ICHECK_EQ(op->args.size(), 1)
       << "tl.ascend_set_copy_pad_value expects exactly 1 argument";
   const DataType dtype = op->args[0].dtype();
+  // Probe branch: FP8 scalar constants crash the bisheng compiler, so emit the
+  // physical byte instead of a typed literal. Only the probe values are mapped.
+  if (dtype.is_float8_e4m3fn() || dtype.is_float8_e5m2()) {
+    const auto *value = op->args[0].as<FloatImmNode>();
+    ICHECK(value != nullptr)
+        << "FP8 pad probe requires a constant value, got " << op->args[0];
+    int byte = -1;
+    if (value->value == 0.0) {
+      byte = 0x00;
+    } else if (value->value == 1.5) {
+      byte = dtype.is_float8_e4m3fn() ? 0x3C : 0x3E;
+    }
+    ICHECK(byte >= 0) << "FP8 pad probe supports only 0.0 and 1.5, got "
+                      << value->value;
+    const std::string target_value = name_supply_->FreshName("__asc_pad_val");
+    PrintIndent();
+    stream << "uint8_t " << target_value << " = " << byte << ";\n";
+    PrintIndent();
+    stream << "asc_set_copy_pad_val(*reinterpret_cast<uint8_t*>(&"
+           << target_value << "));\n";
+    return;
+  }
   // Probe branch: FP4 has no legal C++ scalar form, so encode the 4-bit value
   // into the physical pad byte by duplicating the nibble. The probe from
   // 2026-11-11 showed the hardware copies the register's low byte verbatim.
