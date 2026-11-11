@@ -472,6 +472,35 @@ def test_pad_value_is_set_before_the_padded_dma():
     assert body.seq[1].value.same_as(copy)
 
 
+@pytest.mark.parametrize(
+    "dtype,dst_cols,row_bytes,right_pad,src_stride,dst_stride",
+    [
+        ("float8_e4m3fn", 32, 30, 2, 30, 32),
+        ("float8_e5m2", 32, 30, 2, 30, 32),
+        # FP4 每 2 个逻辑元素打包为 1 字节：30 元素 -> 15 字节，补齐到 32 字节
+        # 需要 17 字节 = 34 个逻辑元素，因此 dst 需按 64 元素(32 字节)分配。
+        ("float4_e2m1fn", 64, 15, 34, 15, 32),
+    ],
+    ids=["fp8-e4m3fn", "fp8-e5m2", "fp4"],
+)
+def test_fp8_fp4_pad_value_is_set_before_the_padded_dma(dtype, dst_cols, row_bytes, right_pad, src_stride, dst_stride):
+    @T.prim_func
+    def before(src: T.Tensor((4, 30), dtype)):
+        dst = T.alloc_shared((4, dst_cols), dtype)
+        T.copy(src, dst[:, :30], pad_value=0.0)
+
+    target = tvm.target.Target("ascend")
+    with target:
+        after = transform.AscendLowerTileOp()(tvm.IRModule({"main": before.with_attr("target", target)}))
+    (copy,) = calls(after, "tl.ascend_copy_gm_to_ubuf")
+    _equal([copy.args[i] for i in (3, 4, 5, 6, 7, 9, 10)], [4, row_bytes, 0, right_pad, 1, src_stride, dst_stride])
+    body = after["main"].body.block.body
+    assert isinstance(body, tirx.SeqStmt)
+    assert body.seq[0].value.op.name == "tl.ascend_set_copy_pad_value"
+    assert float(body.seq[0].value.args[0]) == 0.0
+    assert body.seq[1].value.same_as(copy)
+
+
 @pytest.mark.parametrize("implicit", [False, True], ids=["explicit-transpose", "layout-transpose"])
 @pytest.mark.parametrize(
     "dtype,mn,k,dst_k,error",

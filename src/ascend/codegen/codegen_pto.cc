@@ -424,12 +424,12 @@ bool IsPackedFp4Pair(DataType dtype) {
 
 bool IsStorageDtypeCompatible(DataType lhs, DataType rhs) {
   // Packed FP4 storage is represented as float4_e2m1fnx2: two logical FP4
-  // elements in one physical byte.  It is intentionally non-scalar in TVM,
-  // but a same-type GM<->UB MTE is a raw storage copy, not a dtype conversion.
-  // Keep the exception exact so packed FP4 is never treated as compatible
-  // with an unrelated 8-bit element type.
-  if (IsPackedFp4Pair(lhs) || IsPackedFp4Pair(rhs)) {
-    return lhs == rhs;
+  // elements in one physical byte.  A scalar FP4 value (such as a copy pad
+  // constant) denotes the same logical element type as its packed pair, so any
+  // two FP4 dtypes are storage-compatible, while FP4 remains incompatible with
+  // an unrelated 8-bit element type.
+  if (lhs.is_float4_e2m1fn() || rhs.is_float4_e2m1fn()) {
+    return lhs.is_float4_e2m1fn() && rhs.is_float4_e2m1fn();
   }
   if (!lhs.is_scalar() || !rhs.is_scalar() || lhs.bits() != rhs.bits()) {
     return false;
@@ -3065,6 +3065,14 @@ std::string CodeGenTileLangPTO::GetAscendCopyGmUbExpr_(const CallNode *op) {
       RemoveOutermostParentheses(PrintExpr_(op->args[5]));
   std::string right_padding =
       RemoveOutermostParentheses(PrintExpr_(op->args[6]));
+  // FP4 的 right_pad 由 lowering 以逻辑元素给出，PTO 按物理字节存储（每字节
+  // 2 个 FP4），需折半为字节数。
+  if (dst_dtype.is_float4_e2m1fn()) {
+    const auto *rp = op->args[6].as<IntImmNode>();
+    ICHECK(rp != nullptr)
+        << "PTO FP4 padded GM->UB copy requires a constant right padding";
+    right_padding = std::to_string(rp->value / 2);
+  }
   if (data_select == 0) {
     arith::Analyzer padding_analyzer;
     ICHECK(padding_analyzer.CanProveEqual(op->args[5],
@@ -3183,14 +3191,16 @@ void CodeGenTileLangPTO::RecordAscendCopyPadValue_(const CallNode *op) {
       << "tl.ascend_set_copy_pad_value expects exactly 1 argument";
   DataType dtype = op->args[0].dtype();
   int bits = dtype.bits();
-  bool supported =
-      dtype.is_scalar() && (dtype.is_bfloat16() ||
-                            (dtype.is_float() && (bits == 16 || bits == 32)) ||
-                            ((dtype.is_int() || dtype.is_uint()) &&
-                             (bits == 8 || bits == 16 || bits == 32)));
+  bool supported = dtype.is_scalar() &&
+                   (dtype.is_bfloat16() ||
+                    (dtype.is_float() && (bits == 16 || bits == 32)) ||
+                    dtype.is_float8_e4m3fn() || dtype.is_float8_e5m2() ||
+                    dtype.is_float4_e2m1fn() ||
+                    ((dtype.is_int() || dtype.is_uint()) &&
+                     (bits == 8 || bits == 16 || bits == 32)));
   ICHECK(supported)
       << "PTO tl.ascend_set_copy_pad_value supports scalar int/uint8/16/32, "
-         "float16, bfloat16, and float32 values, got "
+         "float16, bfloat16, float32, and FP8/FP4 (constant zero) values, got "
       << dtype;
   current_copy_pad_value_id_ = copy_pad_value_counter_++;
   current_copy_pad_value_dtype_ = dtype;
