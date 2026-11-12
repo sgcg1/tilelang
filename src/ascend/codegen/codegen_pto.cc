@@ -3200,7 +3200,7 @@ void CodeGenTileLangPTO::RecordAscendCopyPadValue_(const CallNode *op) {
                      (bits == 8 || bits == 16 || bits == 32)));
   ICHECK(supported)
       << "PTO tl.ascend_set_copy_pad_value supports scalar int/uint8/16/32, "
-         "float16, bfloat16, float32, and FP8/FP4 (constant zero) values, got "
+         "float16, bfloat16, float32, and FP8/FP4 values, got "
       << dtype;
   current_copy_pad_value_id_ = copy_pad_value_counter_++;
   current_copy_pad_value_dtype_ = dtype;

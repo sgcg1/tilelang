@@ -144,19 +144,41 @@ def test_gm_to_ub_pad_value(reuse_pad_register):
 
 
 @pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float8_e5m2"], ids=["e4m3fn", "e5m2"])
-def test_gm_to_ub_pad_value_fp8(dtype):
+@pytest.mark.parametrize("pad_value", [0.0, 1.5, -1.5], ids=["zero", "positive", "negative"])
+def test_gm_to_ub_pad_value_fp8(dtype, pad_value):
     @T.prim_func
     def copy(A: T.Tensor((2, 30), dtype), O: T.Tensor((2, 32), dtype)):
         with T.Kernel(1):
             ub = T.alloc_shared((2, 32), dtype)
-            T.copy(A, ub[:, :30], pad_value=0.0)
+            T.copy(A, ub[:, :30], pad_value=pad_value)
             T.copy(ub, O)
 
     device = torch.device("npu")
     torch_dtype = getattr(torch, dtype)
     a = torch.arange(60, dtype=torch.float32).to(torch_dtype).reshape(2, 30).to(device)
     result = tilelang.compile(copy, target="ascend", out_idx=-1)(a)
-    expected = torch.zeros((2, 32), dtype=torch.float32)
+    expected = torch.full((2, 32), pad_value, dtype=torch.float32)
+    expected[:, :30] = a.cpu().float()
+    torch.testing.assert_close(result.cpu().float(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float8_e5m2"], ids=["e4m3fn", "e5m2"])
+def test_gm_to_ub_pad_value_fp8_data_select(dtype):
+    pad_value = 1.5
+
+    @T.prim_func
+    def copy(A: T.Tensor((2, 30), dtype), O: T.Tensor((2, 32), dtype)):
+        with T.Kernel(1):
+            ub = T.alloc_shared((2, 32), dtype)
+            T.ascend_set_copy_pad_value(pad_value, dtype=dtype)
+            T.copy(A, ub[:, :30], data_select=True)
+            T.copy(ub, O)
+
+    device = torch.device("npu")
+    torch_dtype = getattr(torch, dtype)
+    a = torch.arange(60, dtype=torch.float32).to(torch_dtype).reshape(2, 30).to(device)
+    result = tilelang.compile(copy, target="ascend", out_idx=-1)(a)
+    expected = torch.full((2, 32), pad_value, dtype=torch.float32)
     expected[:, :30] = a.cpu().float()
     torch.testing.assert_close(result.cpu().float(), expected, rtol=0, atol=0)
 
@@ -165,22 +187,35 @@ def test_gm_to_ub_pad_value_fp8(dtype):
     not hasattr(torch, "float4_e2m1fn_x2"),
     reason="PyTorch float4_e2m1fn_x2 dtype is unavailable",
 )
-def test_gm_to_ub_pad_value_fp4():
+@pytest.mark.parametrize(
+    "pad_value,pad_byte",
+    [
+        (0.0, 0x00),
+        (1.0, 0x22),
+        (-1.0, 0xAA),
+        # 0.75 恰好落在 0.5/1.0 中间，按 round-to-nearest-even 取 1.0。
+        (0.75, 0x22),
+        # 超出 E2M1 最大可表示值 6.0，饱和到 6.0。
+        (10.0, 0x77),
+    ],
+    ids=["zero", "positive", "negative", "round-to-even", "saturate"],
+)
+def test_gm_to_ub_pad_value_fp4(pad_value, pad_byte):
     @T.prim_func
     def copy(A: T.Tensor((2, 30), "float4_e2m1fn"), O: T.Tensor((2, 64), "float4_e2m1fn")):
         with T.Kernel(1):
             ub = T.alloc_shared((2, 64), "float4_e2m1fn")
-            T.copy(A, ub[:, :30], pad_value=0.0)
+            T.copy(A, ub[:, :30], pad_value=pad_value)
             T.copy(ub, O)
 
     device = torch.device("npu")
-    # 30 个 FP4 逻辑元素 = 15 字节/行。
+    # 30 个 FP4 逻辑元素 = 15 字节/行；补零字节为 nibble 复制后的整字节。
     src_bytes = torch.randint(0, 256, (2, 15), dtype=torch.uint8, device="cpu").to(device)
     src_fp4 = src_bytes.view(torch.float4_e2m1fn_x2)
     out = tilelang.compile(copy, target="ascend", out_idx=-1)(src_fp4)
     torch.npu.synchronize()
 
     out_bytes = out.view(torch.uint8)  # (2, 32) 字节
-    expected_bytes = torch.zeros((2, 32), dtype=torch.uint8, device="cpu")
+    expected_bytes = torch.full((2, 32), pad_byte, dtype=torch.uint8, device="cpu")
     expected_bytes[:, :15] = src_bytes.cpu()
     torch.testing.assert_close(out_bytes.cpu(), expected_bytes)

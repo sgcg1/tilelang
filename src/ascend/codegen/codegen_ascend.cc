@@ -1553,17 +1553,123 @@ void CodeGenTileLangAscend::EmitL0cToGmCopy_(const CallNode *op) {
                  {op->args[8]}});
 }
 
+// FP8/FP4 pad values cannot be printed as typed C++ literals: bisheng crashes
+// on scalar FP8 constants and FP4 has no scalar type. Encode the constant into
+// the physical pad byte on the host instead, using the same round-to-nearest,
+// saturate-to-finite semantics as the device-side casts in
+// tl_templates/ascend/ascend_fp8.h. Codes are ordered by magnitude, so the
+// nearest-code search saturates by itself.
+static double DecodeE4M3Magnitude(int code) {
+  const int exponent = (code >> 3) & 0xf;
+  const int mantissa = code & 0x7;
+  if (exponent == 0) {
+    return std::ldexp(static_cast<double>(mantissa), -9);
+  }
+  return std::ldexp(1.0 + mantissa / 8.0, exponent - 7);
+}
+
+static double DecodeE5M2Magnitude(int code) {
+  const int exponent = (code >> 2) & 0x1f;
+  const int mantissa = code & 0x3;
+  if (exponent == 0) {
+    return std::ldexp(static_cast<double>(mantissa), -16);
+  }
+  return std::ldexp(1.0 + mantissa / 4.0, exponent - 15);
+}
+
+static double DecodeE2M1Magnitude(int code) {
+  const int exponent = (code >> 1) & 0x3;
+  const int mantissa = code & 0x1;
+  if (exponent == 0) {
+    return 0.5 * mantissa;
+  }
+  return std::ldexp(1.0 + 0.5 * mantissa, exponent - 1);
+}
+
+template <typename DecodeFn>
+static int NearestPadCode(double magnitude, int max_code, DecodeFn decode) {
+  int best_code = 0;
+  double best_diff = std::abs(decode(0) - magnitude);
+  for (int code = 1; code <= max_code; ++code) {
+    const double diff = std::abs(decode(code) - magnitude);
+    // Equal distance means the value sits exactly between two neighbours; the
+    // even mantissa bit wins, matching round-to-nearest-even.
+    if (diff < best_diff || (diff == best_diff && (code & 1) == 0)) {
+      best_code = code;
+      best_diff = diff;
+    }
+  }
+  return best_code;
+}
+
+static uint8_t EncodeE4M3PadByte(double value) {
+  if (std::isnan(value)) {
+    return std::signbit(value) ? 0xff : 0x7f;
+  }
+  if (value == 0.0) {
+    return 0;
+  }
+  const bool negative = std::signbit(value);
+  // Saturating casts map infinities and overflowing values to the largest
+  // finite magnitude.
+  int code = 0x7e;
+  if (!std::isinf(value)) {
+    code = NearestPadCode(std::fabs(value), 0x7e, DecodeE4M3Magnitude);
+  }
+  return static_cast<uint8_t>((negative ? 0x80 : 0x00) | code);
+}
+
+static uint8_t EncodeE5M2PadByte(double value) {
+  if (std::isnan(value)) {
+    return std::signbit(value) ? 0xff : 0x7f;
+  }
+  if (value == 0.0) {
+    return 0;
+  }
+  const bool negative = std::signbit(value);
+  int code = 0x7b;
+  if (!std::isinf(value)) {
+    code = NearestPadCode(std::fabs(value), 0x7b, DecodeE5M2Magnitude);
+  }
+  return static_cast<uint8_t>((negative ? 0x80 : 0x00) | code);
+}
+
+static uint8_t EncodeE2M1PadByte(double value) {
+  if (std::isnan(value) || value == 0.0) {
+    return 0;
+  }
+  const bool negative = std::signbit(value);
+  int magnitude = 0x7;
+  if (!std::isinf(value)) {
+    magnitude = NearestPadCode(std::fabs(value), 0x7, DecodeE2M1Magnitude);
+  }
+  const int code = magnitude | (negative ? 0x8 : 0x0);
+  // The pad register fills whole bytes, so both nibbles carry the same value.
+  return static_cast<uint8_t>(code * 0x11);
+}
+
 void CodeGenTileLangAscend::EmitSetCopyPadValue_(const CallNode *op) {
   ICHECK_EQ(op->args.size(), 1)
       << "tl.ascend_set_copy_pad_value expects exactly 1 argument";
   const DataType dtype = op->args[0].dtype();
-  // FP8/FP4 的填充值只能是常量 0（物理字节 0x00），直接按 uint8_t 写入，
-  // 避免为这类 dtype 生成非法的 C++ 标量字面量。
   if (dtype.is_float8_e4m3fn() || dtype.is_float8_e5m2() ||
       dtype.is_float4_e2m1fn()) {
+    const auto *value = op->args[0].as<FloatImmNode>();
+    ICHECK(value != nullptr)
+        << "FP8/FP4 copy pad values must be compile-time constants, got "
+        << op->args[0];
+    uint8_t byte;
+    if (dtype.is_float4_e2m1fn()) {
+      byte = EncodeE2M1PadByte(value->value);
+    } else if (dtype.is_float8_e4m3fn()) {
+      byte = EncodeE4M3PadByte(value->value);
+    } else {
+      byte = EncodeE5M2PadByte(value->value);
+    }
     const std::string target_value = name_supply_->FreshName("__asc_pad_val");
     PrintIndent();
-    stream << "uint8_t " << target_value << " = 0;\n";
+    stream << "uint8_t " << target_value << " = " << static_cast<int>(byte)
+           << ";\n";
     PrintIndent();
     stream << "asc_set_copy_pad_val(*reinterpret_cast<uint8_t*>(&"
            << target_value << "));\n";

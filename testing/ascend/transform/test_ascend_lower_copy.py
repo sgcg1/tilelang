@@ -501,6 +501,32 @@ def test_fp8_fp4_pad_value_is_set_before_the_padded_dma(dtype, dst_cols, row_byt
     assert body.seq[1].value.same_as(copy)
 
 
+@pytest.mark.parametrize(
+    "dtype,pad_value",
+    [
+        ("float8_e4m3fn", 1.5),
+        ("float8_e5m2", -1.5),
+        ("float4_e2m1fn", 1.0),
+    ],
+    ids=["fp8-e4m3fn", "fp8-e5m2", "fp4"],
+)
+def test_fp8_fp4_nonzero_pad_value_reaches_lowering(dtype, pad_value):
+    dst_cols = 64 if dtype == "float4_e2m1fn" else 32
+
+    @T.prim_func
+    def before(src: T.Tensor((4, 30), dtype)):
+        dst = T.alloc_shared((4, dst_cols), dtype)
+        T.copy(src, dst[:, :30], pad_value=pad_value)
+
+    target = tvm.target.Target("ascend")
+    with target:
+        after = transform.AscendLowerTileOp()(tvm.IRModule({"main": before.with_attr("target", target)}))
+    body = after["main"].body.block.body
+    assert isinstance(body, tirx.SeqStmt)
+    assert body.seq[0].value.op.name == "tl.ascend_set_copy_pad_value"
+    assert float(body.seq[0].value.args[0]) == pad_value
+
+
 @pytest.mark.parametrize("implicit", [False, True], ids=["explicit-transpose", "layout-transpose"])
 @pytest.mark.parametrize(
     "dtype,mn,k,dst_k,error",

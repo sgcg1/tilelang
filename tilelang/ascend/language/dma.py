@@ -26,8 +26,9 @@ _PAD_VALUE_SUPPORTED_DTYPES = frozenset(
     }
 )
 
-# FP8/FP4 的填充值目前仅支持常量零（物理字节 0x00），非零填充尚未实现。
-_ZERO_ONLY_PAD_DTYPES = frozenset({"float8_e4m3fn", "float8_e5m2", "float4_e2m1fn"})
+# FP8/FP4 没有可用的 C++ 标量类型，填充值需要在 codegen 阶段编码为物理字节，
+# 因此这类 dtype 只接受编译期常量。
+_ENCODED_PAD_DTYPES = frozenset({"float8_e4m3fn", "float8_e5m2", "float4_e2m1fn"})
 
 
 def ascend_set_copy_pad_value(value, dtype=None) -> None:
@@ -47,8 +48,9 @@ def ascend_set_copy_pad_value(value, dtype=None) -> None:
     dtype : str, optional
         Copy element dtype (one of int8/uint8/int16/uint16/float16/bfloat16/
         int32/uint32/float32, plus float8_e4m3fn/float8_e5m2/float4_e2m1fn,
-        which accept only the constant 0). Required when ``value`` is a Python
-        literal; for a typed PrimExpr it defaults to ``value.dtype``.
+        which are encoded into one physical pad byte). Required when ``value``
+        is a Python literal; for a typed PrimExpr it defaults to ``value.dtype``.
+        FP8/FP4 values must be Python constants.
 
     Example
     -------
@@ -64,12 +66,11 @@ def ascend_set_copy_pad_value(value, dtype=None) -> None:
         raise ValueError(
             f"ascend_set_copy_pad_value does not support dtype {dtype!r}; supported dtypes are {sorted(_PAD_VALUE_SUPPORTED_DTYPES)}."
         )
-    if dtype in _ZERO_ONLY_PAD_DTYPES:
-        if not isinstance(value, (int, float)) or float(value) != 0.0:
-            raise ValueError(
-                f"ascend_set_copy_pad_value supports only the constant zero for dtype {dtype!r}; non-zero FP8/FP4 pad values are not yet implemented."
-            )
-        value = 0.0
+    if dtype in _ENCODED_PAD_DTYPES and not isinstance(value, (int, float)):
+        raise ValueError(
+            f"ascend_set_copy_pad_value requires a Python int or float constant for dtype {dtype!r}; "
+            "the FP8/FP4 pad value is encoded into a physical pad byte during code generation, so it cannot be a runtime expression."
+        )
     value = tirx.const(value, dtype) if isinstance(value, (int, float)) else tirx.Cast(dtype, value)
     return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_set_copy_pad_value"), value)
 
